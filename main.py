@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 from chess_analyzer import ChessAnalyzer
 from db_envoy import DBEnvoy
@@ -21,9 +22,26 @@ def _load_dotenv(dotenv_path: str = ".env") -> None:
 
 def _load_stockfish_path() -> str:
     stockfish_path = os.getenv("STOCKFISH_PATH")
-    if not stockfish_path:
-        raise RuntimeError("未設定 STOCKFISH_PATH，請在 .env 填寫。")
-    return stockfish_path
+    if stockfish_path and os.path.isfile(stockfish_path):
+        return stockfish_path
+
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(getattr(sys, "_MEIPASS", ""), "stockfish-windows-x86-64-avx2.exe"))
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "stockfish-windows-x86-64-avx2.exe"))
+    candidates.append(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "stockfish",
+            "stockfish-windows-x86-64-avx2.exe",
+        )
+    )
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    raise RuntimeError("找不到 Stockfish 執行檔，請將 stockfish-windows-x86-64-avx2.exe 放在程式旁邊。")
 
 
 def _run_cli() -> None:
