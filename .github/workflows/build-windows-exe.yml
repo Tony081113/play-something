@@ -38,7 +38,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
-        run: pyinstaller play-something.spec
+        run: python -m PyInstaller play-something.spec
 
       - name: Smoke test EXE
         run: .\dist\play-something.exe --help
