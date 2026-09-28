@@ -101,7 +101,10 @@ class DBEnvoy:
         stored = self._save_sqlite(opp_id, fen, move, score, game_id)
         if not stored:
             return False
-        return self._save_cache(fen, move, score)
+        cached = self._save_cache(fen, move, score)
+        if not cached:
+            print("快取更新失敗，但資料已寫入本地資料庫。")
+        return True
 
     def get_opponent_history(self, opponent_id: str) -> List[Dict[str, Any]]:
         try:
