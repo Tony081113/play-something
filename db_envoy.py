@@ -31,8 +31,14 @@ class DBEnvoy:
         db_dir = os.path.dirname(self._db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        self._cache_ttl_seconds = int(env_values.get("CACHE_TTL_SECONDS", "3600"))
+        self._cache_ttl_seconds = self._parse_positive_int(
+            env_values.get("CACHE_TTL_SECONDS"), default=3600
+        )
+        self._cache_miss_ttl_seconds = self._parse_positive_int(
+            env_values.get("CACHE_MISS_TTL_SECONDS"), default=5
+        )
         self._memory_cache: Dict[str, Tuple[str, float, float]] = {}
+        self._memory_cache_miss: Dict[str, float] = {}
         self._ensure_tables()
 
     def _sqlite_connection(self) -> sqlite3.Connection:
@@ -51,6 +57,9 @@ class DBEnvoy:
             if expires_at > now:
                 return move, score
             self._memory_cache.pop(fen, None)
+        miss_expires_at = self._memory_cache_miss.get(fen)
+        if miss_expires_at and miss_expires_at > now:
+            return None
 
         try:
             with self._sqlite_connection() as connection:
@@ -66,6 +75,7 @@ class DBEnvoy:
                 row = cursor.fetchone()
                 cursor.close()
             if not row:
+                self._memory_cache_miss[fen] = now + self._cache_miss_ttl_seconds
                 return None
             expires_at = float(row["expires_at"])
             if expires_at <= now:
@@ -74,6 +84,7 @@ class DBEnvoy:
             move = str(row["move"])
             score = float(row["score"])
             self._memory_cache[fen] = (move, score, expires_at)
+            self._memory_cache_miss.pop(fen, None)
             return move, score
         except (sqlite3.Error, ValueError, TypeError) as exc:
             print(f"快取讀取失敗：{exc}")
@@ -132,6 +143,7 @@ class DBEnvoy:
                 connection.commit()
                 cursor.close()
             self._memory_cache[fen] = (move, score, expires_at)
+            self._memory_cache_miss.pop(fen, None)
             return True
         except sqlite3.Error as exc:
             self._memory_cache.pop(fen, None)
@@ -167,25 +179,11 @@ class DBEnvoy:
         try:
             with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS move_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        game_id TEXT NULL,
-                        opponent_id TEXT NOT NULL,
-                        fen TEXT NOT NULL,
-                        move_made TEXT,
-                        score REAL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                cursor.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_move_history_fen
-                    ON move_history (fen)
-                    """
-                )
+                schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+                if not os.path.isfile(schema_path):
+                    raise RuntimeError("缺少 schema.sql，無法初始化本地資料庫。")
+                with open(schema_path, "r", encoding="utf-8") as handle:
+                    cursor.executescript(handle.read())
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS analysis_cache (
@@ -193,15 +191,6 @@ class DBEnvoy:
                         move TEXT NOT NULL,
                         score REAL NOT NULL,
                         expires_at REAL NOT NULL
-                    )
-                    """
-                )
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS opponent_stats (
-                        opponent_id TEXT PRIMARY KEY,
-                        total_wins INT NOT NULL DEFAULT 0,
-                        favorite_opening TEXT NOT NULL
                     )
                     """
                 )
@@ -254,6 +243,7 @@ class DBEnvoy:
 
     def _delete_cache(self, fen: str) -> None:
         self._memory_cache.pop(fen, None)
+        self._memory_cache_miss[fen] = time.time() + self._cache_miss_ttl_seconds
         try:
             with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
@@ -262,3 +252,13 @@ class DBEnvoy:
                 cursor.close()
         except sqlite3.Error as exc:
             print(f"快取清理失敗：{exc}")
+
+    @staticmethod
+    def _parse_positive_int(value: Optional[str], default: int) -> int:
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
