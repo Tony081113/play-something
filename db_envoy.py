@@ -87,9 +87,10 @@ class DBEnvoy:
         score: float,
         game_id: Optional[str] = None,
     ) -> bool:
-        cached = self._save_cache(fen, move, score)
         stored = self._save_sqlite(opp_id, fen, move, score, game_id)
-        return cached and stored
+        if not stored:
+            return False
+        return self._save_cache(fen, move, score)
 
     def get_opponent_history(self, opponent_id: str) -> List[Dict[str, Any]]:
         try:
@@ -206,7 +207,7 @@ class DBEnvoy:
                 connection.commit()
                 cursor.close()
         except (sqlite3.Error, RuntimeError) as exc:
-            print(f"SQLite 初始化失敗：{exc}")
+            raise RuntimeError("SQLite 初始化失敗，請檢查本地資料庫設定。") from exc
 
     def get_opponent_opening(self, opp_id: str) -> Dict[str, Any]:
         try:
