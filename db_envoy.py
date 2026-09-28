@@ -115,7 +115,6 @@ class DBEnvoy:
 
     def _save_cache(self, fen: str, move: str, score: float) -> bool:
         expires_at = time.time() + self._cache_ttl_seconds
-        self._memory_cache[fen] = (move, score, expires_at)
         try:
             with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
@@ -132,8 +131,10 @@ class DBEnvoy:
                 )
                 connection.commit()
                 cursor.close()
+            self._memory_cache[fen] = (move, score, expires_at)
             return True
         except sqlite3.Error as exc:
+            self._memory_cache.pop(fen, None)
             print(f"快取寫入失敗：{exc}")
             return False
 
@@ -252,6 +253,7 @@ class DBEnvoy:
         return f"fen:{fen}"
 
     def _delete_cache(self, fen: str) -> None:
+        self._memory_cache.pop(fen, None)
         try:
             with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
