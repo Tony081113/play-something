@@ -35,7 +35,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller==6.13.0
 
       - name: Build EXE
         run: python -m PyInstaller play-something.spec
