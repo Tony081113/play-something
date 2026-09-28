@@ -2,10 +2,11 @@ name: Build Windows EXE
 
 on:
   push:
-    branches:
-      - "**"
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-windows-exe:
