@@ -5,11 +5,13 @@ on:
     paths:
       - "**/*.py"
       - "requirements.txt"
+      - "play-something.spec"
       - ".github/workflows/build-windows-exe.yml"
   pull_request:
     paths:
       - "**/*.py"
       - "requirements.txt"
+      - "play-something.spec"
       - ".github/workflows/build-windows-exe.yml"
   workflow_dispatch:
 
@@ -36,7 +38,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --onefile --name play-something main.py
+        run: pyinstaller play-something.spec
 
       - name: Smoke test EXE
         run: .\dist\play-something.exe --help
