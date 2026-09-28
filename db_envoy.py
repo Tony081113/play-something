@@ -28,6 +28,9 @@ class DBEnvoy:
             if os.path.isabs(db_path)
             else os.path.abspath(os.path.join(os.getcwd(), db_path))
         )
+        db_dir = os.path.dirname(self._db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         self._cache_ttl_seconds = int(env_values.get("CACHE_TTL_SECONDS", "3600"))
         self._memory_cache: Dict[str, Tuple[str, float, float]] = {}
         self._ensure_tables()
@@ -191,6 +194,15 @@ class DBEnvoy:
                     )
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS opponent_stats (
+                        opponent_id TEXT PRIMARY KEY,
+                        total_wins INT NOT NULL DEFAULT 0,
+                        favorite_opening TEXT NOT NULL
+                    )
+                    """
+                )
                 connection.commit()
                 cursor.close()
         except (sqlite3.Error, RuntimeError) as exc:
@@ -245,5 +257,5 @@ class DBEnvoy:
                 cursor.execute("DELETE FROM analysis_cache WHERE fen = ?", (fen,))
                 connection.commit()
                 cursor.close()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            print(f"快取清理失敗：{exc}")
