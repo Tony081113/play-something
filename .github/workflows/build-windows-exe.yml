@@ -2,7 +2,15 @@ name: Build Windows EXE
 
 on:
   push:
+    paths:
+      - "**/*.py"
+      - "requirements.txt"
+      - ".github/workflows/build-windows-exe.yml"
   pull_request:
+    paths:
+      - "**/*.py"
+      - "requirements.txt"
+      - ".github/workflows/build-windows-exe.yml"
   workflow_dispatch:
 
 permissions:
