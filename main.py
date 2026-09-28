@@ -1,29 +1,35 @@
 import argparse
 import os
+import sys
 
 from chess_analyzer import ChessAnalyzer
 from db_envoy import DBEnvoy
 
 
-def _load_dotenv(dotenv_path: str = ".env") -> None:
-    if not os.path.isfile(dotenv_path):
-        return
-    with open(dotenv_path, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip("\"").strip("'"))
-
-
 def _load_stockfish_path() -> str:
-    stockfish_path = os.getenv("STOCKFISH_PATH")
-    if not stockfish_path:
-        raise RuntimeError("未設定 STOCKFISH_PATH，請在 .env 填寫。")
-    return stockfish_path
+    candidates = []
+
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(os.path.join(meipass, "stockfish-windows-x86-64-avx2.exe"))
+        candidates.append(
+            os.path.join(os.path.dirname(sys.executable), "stockfish-windows-x86-64-avx2.exe")
+        )
+
+    base_dir = os.path.dirname(__file__)
+    candidates.extend(
+        [
+            os.path.join(base_dir, "stockfish-windows-x86-64-avx2.exe"),
+            os.path.join(base_dir, "stockfish", "stockfish-windows-x86-64-avx2.exe"),
+        ]
+    )
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    raise RuntimeError("找不到內建 Stockfish 引擎，請重新下載發佈版。")
 
 
 def _run_cli() -> None:
@@ -744,7 +750,6 @@ def _run_gui() -> None:
 
 
 def main() -> None:
-    _load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", action="store_true", help="Run in CLI mode")
     args = parser.parse_args()
