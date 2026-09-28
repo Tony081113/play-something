@@ -19,6 +19,27 @@ def _load_dotenv(dotenv_path: str) -> Dict[str, str]:
     return values
 
 
+DEFAULT_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS move_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id TEXT NULL,
+    opponent_id TEXT NOT NULL,
+    fen TEXT NOT NULL,
+    move_made TEXT,
+    score REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_move_history_fen ON move_history (fen);
+
+CREATE TABLE IF NOT EXISTS opponent_stats (
+    opponent_id TEXT PRIMARY KEY,
+    total_wins INT NOT NULL DEFAULT 0,
+    favorite_opening TEXT NOT NULL
+);
+"""
+
+
 class DBEnvoy:
     def __init__(self, dotenv_path: str = ".env") -> None:
         env_values = _load_dotenv(dotenv_path)
@@ -101,10 +122,7 @@ class DBEnvoy:
         stored = self._save_sqlite(opp_id, fen, move, score, game_id)
         if not stored:
             return False
-        cached = self._save_cache(fen, move, score)
-        if not cached:
-            print("快取更新失敗，但資料已寫入本地資料庫。")
-        return True
+        return self._save_cache(fen, move, score)
 
     def get_opponent_history(self, opponent_id: str) -> List[Dict[str, Any]]:
         try:
@@ -167,6 +185,23 @@ class DBEnvoy:
                 cursor = connection.cursor()
                 cursor.execute(
                     """
+                    SELECT 1
+                    FROM move_history
+                    WHERE
+                        ((game_id IS NULL AND ? IS NULL) OR game_id = ?)
+                        AND opponent_id = ?
+                        AND fen = ?
+                        AND move_made = ?
+                        AND score = ?
+                    LIMIT 1
+                    """,
+                    (game_id, game_id, opp_id, fen, move, score),
+                )
+                if cursor.fetchone():
+                    cursor.close()
+                    return True
+                cursor.execute(
+                    """
                     INSERT INTO move_history (game_id, opponent_id, fen, move_made, score)
                     VALUES (?, ?, ?, ?, ?)
                     """,
@@ -183,11 +218,8 @@ class DBEnvoy:
         try:
             with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
-                schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
-                if not os.path.isfile(schema_path):
-                    raise RuntimeError("缺少 schema.sql，無法初始化本地資料庫。")
-                with open(schema_path, "r", encoding="utf-8") as handle:
-                    cursor.executescript(handle.read())
+                schema_sql = self._load_schema_sql()
+                cursor.executescript(schema_sql)
                 connection.commit()
                 cursor.close()
         except (sqlite3.Error, RuntimeError) as exc:
@@ -256,3 +288,11 @@ class DBEnvoy:
         except (TypeError, ValueError):
             return default
         return parsed if parsed > 0 else default
+
+    @staticmethod
+    def _load_schema_sql() -> str:
+        schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+        if os.path.isfile(schema_path):
+            with open(schema_path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        return DEFAULT_SCHEMA_SQL
