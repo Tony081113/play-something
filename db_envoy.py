@@ -3,21 +3,6 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-def _load_dotenv(dotenv_path: str) -> Dict[str, str]:
-    values: Dict[str, str] = {}
-    if not os.path.isfile(dotenv_path):
-        return values
-    with open(dotenv_path, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("\"").strip("'")
-    return values
-
 
 DEFAULT_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS move_history (
@@ -41,23 +26,13 @@ CREATE TABLE IF NOT EXISTS opponent_stats (
 
 
 class DBEnvoy:
-    def __init__(self, dotenv_path: str = ".env") -> None:
-        env_values = _load_dotenv(dotenv_path)
-        db_path = env_values.get("LOCAL_DB_PATH", "chess_db.sqlite3")
-        self._db_path = (
-            db_path
-            if os.path.isabs(db_path)
-            else os.path.abspath(os.path.join(os.getcwd(), db_path))
-        )
+    def __init__(self) -> None:
+        self._db_path = os.path.join(os.path.dirname(__file__), "chess_db.sqlite3")
         db_dir = os.path.dirname(self._db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        self._cache_ttl_seconds = self._parse_positive_int(
-            env_values.get("CACHE_TTL_SECONDS"), default=3600
-        )
-        self._cache_miss_ttl_seconds = self._parse_positive_int(
-            env_values.get("CACHE_MISS_TTL_SECONDS"), default=5
-        )
+        self._cache_ttl_seconds = 3600
+        self._cache_miss_ttl_seconds = 5
         self._memory_cache: Dict[str, Tuple[str, float, float]] = {}
         self._memory_cache_miss: Dict[str, float] = {}
         self._ensure_tables()
@@ -68,7 +43,7 @@ class DBEnvoy:
             connection.row_factory = sqlite3.Row
             return connection
         except sqlite3.Error as exc:
-            raise RuntimeError("SQLite 連線失敗，請檢查 LOCAL_DB_PATH。") from exc
+            raise RuntimeError("SQLite 連線失敗，請檢查本地資料庫檔案。") from exc
 
     def check_cache(self, fen: str) -> Optional[Tuple[str, float]]:
         now = time.time()
@@ -278,16 +253,6 @@ class DBEnvoy:
                 cursor.close()
         except sqlite3.Error as exc:
             print(f"快取清理失敗：{exc}")
-
-    @staticmethod
-    def _parse_positive_int(value: Optional[str], default: int) -> int:
-        if value is None:
-            return default
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return default
-        return parsed if parsed > 0 else default
 
     @staticmethod
     def _load_schema_sql() -> str:
