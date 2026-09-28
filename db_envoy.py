@@ -1,70 +1,89 @@
-import json
 import os
+import sqlite3
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import mysql.connector
-import redis
 
+DEFAULT_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS move_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id TEXT NULL,
+    opponent_id TEXT NOT NULL,
+    fen TEXT NOT NULL,
+    move_made TEXT,
+    score REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
-def _load_dotenv(dotenv_path: str) -> Dict[str, str]:
-    values: Dict[str, str] = {}
-    if not os.path.isfile(dotenv_path):
-        return values
-    with open(dotenv_path, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("\"").strip("'")
-    return values
+CREATE INDEX IF NOT EXISTS idx_move_history_fen ON move_history (fen);
+
+CREATE TABLE IF NOT EXISTS opponent_stats (
+    opponent_id TEXT PRIMARY KEY,
+    total_wins INT NOT NULL DEFAULT 0,
+    favorite_opening TEXT NOT NULL
+);
+"""
 
 
 class DBEnvoy:
-    def __init__(self, dotenv_path: str = ".env") -> None:
-        env_values = _load_dotenv(dotenv_path)
-        self._mysql_config = {
-            "host": env_values.get("MYSQL_HOST", "localhost"),
-            "port": int(env_values.get("MYSQL_PORT", "3306")),
-            "user": env_values.get("MYSQL_USER"),
-            "password": env_values.get("MYSQL_PASSWORD"),
-            "database": env_values.get("MYSQL_DB", "chess_db"),
-        }
-        self._redis_config = {
-            "host": env_values.get("REDIS_HOST", "localhost"),
-            "port": int(env_values.get("REDIS_PORT", "6379")),
-            "password": env_values.get("REDIS_PASSWORD"),
-            "db": int(env_values.get("REDIS_DB", "0")),
-            "decode_responses": True,
-        }
-        self._validate_secrets()
+    def __init__(self) -> None:
+        self._db_path = os.path.join(os.path.dirname(__file__), "chess_db.sqlite3")
+        db_dir = os.path.dirname(self._db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        self._cache_ttl_seconds = 3600
+        self._cache_miss_ttl_seconds = 5
+        self._memory_cache: Dict[str, Tuple[str, float, float]] = {}
+        self._memory_cache_miss: Dict[str, float] = {}
         self._ensure_tables()
 
-    def _mysql_connection(self) -> mysql.connector.MySQLConnection:
+    def _sqlite_connection(self) -> sqlite3.Connection:
         try:
-            return mysql.connector.connect(**self._mysql_config)
-        except mysql.connector.Error as exc:
-            raise RuntimeError("MySQL 連線失敗，請檢查 .env 設定。") from exc
-
-    def _redis_client(self) -> redis.Redis:
-        return redis.Redis(**self._redis_config)
+            connection = sqlite3.connect(self._db_path)
+            connection.row_factory = sqlite3.Row
+            return connection
+        except sqlite3.Error as exc:
+            raise RuntimeError("SQLite 連線失敗，請檢查本地資料庫檔案。") from exc
 
     def check_cache(self, fen: str) -> Optional[Tuple[str, float]]:
+        now = time.time()
+        memory_cached = self._memory_cache.get(fen)
+        if memory_cached:
+            move, score, expires_at = memory_cached
+            if expires_at > now:
+                return move, score
+            self._memory_cache.pop(fen, None)
+        miss_expires_at = self._memory_cache_miss.get(fen)
+        if miss_expires_at and miss_expires_at > now:
+            return None
+
         try:
-            client = self._redis_client()
-            raw = client.get(self._cache_key(fen))
-            if not raw:
+            with self._sqlite_connection() as connection:
+                cursor = connection.cursor()
+                cursor.execute(
+                    """
+                    SELECT move, score, expires_at
+                    FROM analysis_cache
+                    WHERE fen = ?
+                    """,
+                    (fen,),
+                )
+                row = cursor.fetchone()
+                cursor.close()
+            if not row:
+                self._memory_cache_miss[fen] = now + self._cache_miss_ttl_seconds
                 return None
-            payload = json.loads(raw)
-            move = payload.get("move")
-            score = payload.get("score")
-            if move is None or score is None:
+            expires_at = float(row["expires_at"])
+            if expires_at <= now:
+                self._delete_cache(fen)
                 return None
-            return move, float(score)
-        except (redis.RedisError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            print(f"Redis 讀取失敗：{exc}")
+            move = str(row["move"])
+            score = float(row["score"])
+            self._memory_cache[fen] = (move, score, expires_at)
+            self._memory_cache_miss.pop(fen, None)
+            return move, score
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            print(f"快取讀取失敗：{exc}")
             return None
 
     def save_analysis(
@@ -75,19 +94,20 @@ class DBEnvoy:
         score: float,
         game_id: Optional[str] = None,
     ) -> bool:
-        cached = self._save_cache(fen, move, score)
-        stored = self._save_mysql(opp_id, fen, move, score, game_id)
-        return cached and stored
+        stored = self._save_sqlite(opp_id, fen, move, score, game_id)
+        if not stored:
+            return False
+        return self._save_cache(fen, move, score)
 
     def get_opponent_history(self, opponent_id: str) -> List[Dict[str, Any]]:
         try:
-            with self._mysql_connection() as connection:
-                cursor = connection.cursor(dictionary=True)
+            with self._sqlite_connection() as connection:
+                cursor = connection.cursor()
                 cursor.execute(
                     """
                     SELECT move_made AS move, COUNT(*) AS move_count, AVG(score) AS avg_score
                     FROM move_history
-                    WHERE opponent_id = %s
+                    WHERE opponent_id = ?
                     GROUP BY move_made
                     ORDER BY move_count DESC
                     """,
@@ -95,22 +115,39 @@ class DBEnvoy:
                 )
                 rows = cursor.fetchall()
                 cursor.close()
-                return rows
-        except (mysql.connector.Error, RuntimeError) as exc:
-            print(f"MySQL read failed: {exc}")
+                return [dict(row) for row in rows]
+        except (sqlite3.Error, RuntimeError) as exc:
+            print(f"SQLite 讀取失敗：{exc}")
             return []
 
     def _save_cache(self, fen: str, move: str, score: float) -> bool:
+        expires_at = time.time() + self._cache_ttl_seconds
         try:
-            client = self._redis_client()
-            payload = json.dumps({"move": move, "score": score})
-            client.setex(self._cache_key(fen), 3600, payload)
+            with self._sqlite_connection() as connection:
+                cursor = connection.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO analysis_cache (fen, move, score, expires_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(fen) DO UPDATE SET
+                        move = excluded.move,
+                        score = excluded.score,
+                        expires_at = excluded.expires_at
+                    """,
+                    (fen, move, score, expires_at),
+                )
+                connection.commit()
+                cursor.close()
+            self._memory_cache[fen] = (move, score, expires_at)
+            self._memory_cache_miss.pop(fen, None)
             return True
-        except redis.RedisError as exc:
-            print(f"Redis 寫入失敗：{exc}")
+        except sqlite3.Error as exc:
+            self._memory_cache.pop(fen, None)
+            self._memory_cache_miss.pop(fen, None)
+            print(f"快取寫入失敗：{exc}")
             return False
 
-    def _save_mysql(
+    def _save_sqlite(
         self,
         opp_id: str,
         fen: str,
@@ -119,74 +156,67 @@ class DBEnvoy:
         game_id: Optional[str],
     ) -> bool:
         try:
-            with self._mysql_connection() as connection:
+            with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO move_history
-                        (game_id, opponent_id, fen, move_made, score)
-                    VALUES (%s, %s, %s, %s, %s)
+                    SELECT 1
+                    FROM move_history
+                    WHERE
+                        ((game_id IS NULL AND ? IS NULL) OR game_id = ?)
+                        AND opponent_id = ?
+                        AND fen = ?
+                        AND move_made = ?
+                        AND score = ?
+                    LIMIT 1
+                    """,
+                    (game_id, game_id, opp_id, fen, move, score),
+                )
+                if cursor.fetchone():
+                    cursor.close()
+                    return True
+                cursor.execute(
+                    """
+                    INSERT INTO move_history (game_id, opponent_id, fen, move_made, score)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     (game_id, opp_id, fen, move, score),
                 )
                 connection.commit()
                 cursor.close()
             return True
-        except (mysql.connector.Error, RuntimeError) as exc:
-            print(f"MySQL 寫入失敗：{exc}")
+        except (sqlite3.Error, RuntimeError) as exc:
+            print(f"SQLite 寫入失敗：{exc}")
             return False
 
     def _ensure_tables(self) -> None:
         try:
-            with self._mysql_connection() as connection:
+            with self._sqlite_connection() as connection:
                 cursor = connection.cursor()
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS move_history (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        game_id VARCHAR(50) NULL,
-                        opponent_id VARCHAR(50) NOT NULL,
-                        fen TEXT NOT NULL,
-                        move_made VARCHAR(10),
-                        score FLOAT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_move_history_fen (fen(30))
-                    )
-                    """
-                )
+                schema_sql = self._load_schema_sql()
+                cursor.executescript(schema_sql)
                 connection.commit()
                 cursor.close()
-        except (mysql.connector.Error, RuntimeError) as exc:
-            print(f"MySQL 初始化失敗：{exc}")
-
-    def _validate_secrets(self) -> None:
-        missing = []
-        if not self._mysql_config.get("user"):
-            missing.append("MYSQL_USER")
-        if not self._mysql_config.get("password"):
-            missing.append("MYSQL_PASSWORD")
-        if self._redis_config.get("password") is None:
-            missing.append("REDIS_PASSWORD")
-        if missing:
-            raise RuntimeError(".env 缺少必要欄位：" + ", ".join(missing))
+        except (sqlite3.Error, RuntimeError) as exc:
+            raise RuntimeError("SQLite 初始化失敗，請檢查本地資料庫設定。") from exc
 
     def get_opponent_opening(self, opp_id: str) -> Dict[str, Any]:
         try:
-            with self._mysql_connection() as connection:
-                cursor = connection.cursor(dictionary=True)
+            with self._sqlite_connection() as connection:
+                cursor = connection.cursor()
                 cursor.execute(
                     """
                     SELECT fen, move_made, COUNT(*) AS move_count
                     FROM move_history
-                    WHERE opponent_id = %s
+                    WHERE opponent_id = ?
                     GROUP BY fen, move_made
                     """,
                     (opp_id,),
                 )
                 rows = cursor.fetchall()
                 cursor.close()
-        except (mysql.connector.Error, RuntimeError) as exc:
-            print(f"MySQL 讀取失敗：{exc}")
+        except (sqlite3.Error, RuntimeError) as exc:
+            print(f"SQLite 讀取失敗：{exc}")
             return {}
 
         def _fullmove(fen: str) -> int:
@@ -198,7 +228,7 @@ class DBEnvoy:
             except ValueError:
                 return 999
 
-        filtered = [row for row in rows if _fullmove(row.get("fen", "")) <= 5]
+        filtered = [dict(row) for row in rows if _fullmove(row["fen"]) <= 5]
         if not filtered:
             return {}
         top = max(filtered, key=lambda item: item.get("move_count", 0))
@@ -211,3 +241,23 @@ class DBEnvoy:
     @staticmethod
     def _cache_key(fen: str) -> str:
         return f"fen:{fen}"
+
+    def _delete_cache(self, fen: str) -> None:
+        self._memory_cache.pop(fen, None)
+        self._memory_cache_miss[fen] = time.time() + self._cache_miss_ttl_seconds
+        try:
+            with self._sqlite_connection() as connection:
+                cursor = connection.cursor()
+                cursor.execute("DELETE FROM analysis_cache WHERE fen = ?", (fen,))
+                connection.commit()
+                cursor.close()
+        except sqlite3.Error as exc:
+            print(f"快取清理失敗：{exc}")
+
+    @staticmethod
+    def _load_schema_sql() -> str:
+        schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+        if os.path.isfile(schema_path):
+            with open(schema_path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        return DEFAULT_SCHEMA_SQL

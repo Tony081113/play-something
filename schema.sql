@@ -1,20 +1,24 @@
-CREATE DATABASE IF NOT EXISTS chess_db;
-
-USE chess_db;
-
 CREATE TABLE IF NOT EXISTS move_history (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    game_id VARCHAR(50) NULL,
-    opponent_id VARCHAR(50) NOT NULL,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id TEXT NULL,
+    opponent_id TEXT NOT NULL,
     fen TEXT NOT NULL,
-    move_made VARCHAR(10),
-    score FLOAT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_move_history_fen (fen(30))
+    move_made TEXT,
+    score REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_move_history_fen ON move_history (fen);
+
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    fen TEXT PRIMARY KEY,
+    move TEXT NOT NULL,
+    score REAL NOT NULL,
+    expires_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS opponent_stats (
-    opponent_id VARCHAR(64) PRIMARY KEY,
+    opponent_id TEXT PRIMARY KEY,
     total_wins INT NOT NULL DEFAULT 0,
-    favorite_opening VARCHAR(128) NOT NULL
+    favorite_opening TEXT NOT NULL
 );
