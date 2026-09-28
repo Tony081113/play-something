@@ -41,7 +41,7 @@ jobs:
         run: python -m PyInstaller play-something.spec
 
       - name: Smoke test EXE
-        run: .\dist\play-something.exe --help
+        run: '& .\dist\play-something.exe --help'
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
