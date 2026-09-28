@@ -147,6 +147,7 @@ class DBEnvoy:
             return True
         except sqlite3.Error as exc:
             self._memory_cache.pop(fen, None)
+            self._memory_cache_miss.pop(fen, None)
             print(f"快取寫入失敗：{exc}")
             return False
 
@@ -184,16 +185,6 @@ class DBEnvoy:
                     raise RuntimeError("缺少 schema.sql，無法初始化本地資料庫。")
                 with open(schema_path, "r", encoding="utf-8") as handle:
                     cursor.executescript(handle.read())
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS analysis_cache (
-                        fen TEXT PRIMARY KEY,
-                        move TEXT NOT NULL,
-                        score REAL NOT NULL,
-                        expires_at REAL NOT NULL
-                    )
-                    """
-                )
                 connection.commit()
                 cursor.close()
         except (sqlite3.Error, RuntimeError) as exc:
