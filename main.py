@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-from chess_analyzer import ChessAnalyzer
+from chess_analyzer import AnalysisResult, ChessAnalyzer
 from db_envoy import DBEnvoy
 
 
@@ -56,10 +56,11 @@ def _run_cli() -> None:
     game_id = input().strip() or None
 
     db_envoy = DBEnvoy()
-    cached = db_envoy.check_cache(fen)
+    cached = db_envoy.get_cached_analysis(fen)
     if cached:
-        move, score = cached
-        print(f"快取最佳走法：{move}（分數：{score}）")
+        print(
+            f"快取最佳走法：{cached['move']}（{_format_score(cached['score'], cached.get('mate_in'))}）"
+        )
         return
 
     history = db_envoy.get_opponent_history(opponent_id)
@@ -69,9 +70,26 @@ def _run_cli() -> None:
             print(f"- {row['move']}: {row['move_count']}（平均 {row['avg_score']:.2f}）")
 
     analyzer = ChessAnalyzer(_load_stockfish_path())
-    best_move, score = analyzer.get_best_move(fen)
-    db_envoy.save_analysis(opponent_id, fen, best_move, score, game_id=game_id)
-    print(f"最佳走法：{best_move}（分數：{score}）")
+    result = analyzer.analyze_position(fen)
+    db_envoy.save_analysis(
+        opponent_id,
+        fen,
+        result.move,
+        result.score,
+        game_id=game_id,
+        mate_in=result.mate_in,
+    )
+    print(f"最佳走法：{result.move}（{_format_score(result.score, result.mate_in)}）")
+
+
+def _format_score(score: float, mate_in=None) -> str:
+    if mate_in is None:
+        return f"分數：{score}"
+    if mate_in > 0:
+        return f"{mate_in} 步內可將殺"
+    if mate_in < 0:
+        return f"對方 {-mate_in} 步內有將殺威脅"
+    return "已是將殺局面"
 
 
 def _run_gui() -> None:
@@ -80,7 +98,7 @@ def _run_gui() -> None:
     from PyQt5 import QtCore, QtGui, QtSvg, QtWidgets
 
     class AiWorker(QtCore.QThread):
-        finished = QtCore.pyqtSignal(str, float, bool)
+        finished = QtCore.pyqtSignal(object, bool)
 
         def __init__(
             self,
@@ -98,14 +116,72 @@ def _run_gui() -> None:
             self._opponent_id = opponent_id
 
         def run(self) -> None:
-            cached = self._db_envoy.check_cache(self._fen)
+            cached = self._db_envoy.get_cached_analysis(self._fen)
             if cached:
-                move, score = cached
-                self.finished.emit(move, score, True)
+                self.finished.emit(
+                    AnalysisResult(
+                        cached["move"],
+                        int(cached["score"]),
+                        cached.get("mate_in"),
+                    ),
+                    True,
+                )
                 return
-            best_move, score = self._analyzer.get_best_move(self._fen, depth=self._depth)
-            self._db_envoy.save_analysis(self._opponent_id, self._fen, best_move, score)
-            self.finished.emit(best_move, score, False)
+            result = self._analyzer.analyze_position(self._fen, depth=self._depth)
+            self._db_envoy.save_analysis(
+                self._opponent_id,
+                self._fen,
+                result.move,
+                result.score,
+                mate_in=result.mate_in,
+            )
+            self.finished.emit(result, False)
+
+    class SelfTrainWorker(QtCore.QThread):
+        finished = QtCore.pyqtSignal(int)
+
+        def __init__(
+            self,
+            analyzer: ChessAnalyzer,
+            db_envoy: DBEnvoy,
+            fen: str,
+            depth: int,
+            plies: int = 8,
+        ) -> None:
+            super().__init__()
+            self._analyzer = analyzer
+            self._db_envoy = db_envoy
+            self._fen = fen
+            self._depth = depth
+            self._plies = plies
+
+        def run(self) -> None:
+            board = chess.Board(self._fen)
+            saved = 0
+            for _ in range(self._plies):
+                if board.is_game_over():
+                    break
+                result = self._analyzer.analyze_position(board.fen(), depth=self._depth)
+                if not result.move:
+                    break
+                stored = self._db_envoy.save_analysis(
+                    "__self_training__",
+                    board.fen(),
+                    result.move,
+                    result.score,
+                    game_id="self-training",
+                    mate_in=result.mate_in,
+                )
+                if stored:
+                    saved += 1
+                try:
+                    move = chess.Move.from_uci(result.move)
+                except ValueError:
+                    break
+                if move not in board.legal_moves:
+                    break
+                board.push(move)
+            self.finished.emit(saved)
 
     class EvalBar(QtWidgets.QWidget):
         def __init__(self) -> None:
@@ -530,6 +606,8 @@ def _run_gui() -> None:
 
             self.opening_label = QtWidgets.QLabel("")
             self.opening_label.setWordWrap(True)
+            self.training_label = QtWidgets.QLabel("")
+            self.training_label.setWordWrap(True)
 
             color_group = QtWidgets.QGroupBox("操作方")
             color_layout = QtWidgets.QVBoxLayout(color_group)
@@ -554,6 +632,12 @@ def _run_gui() -> None:
             analyze_button = QtWidgets.QPushButton("分析")
             analyze_button.clicked.connect(self._on_analyze)
 
+            stats_button = QtWidgets.QPushButton("訓練狀態")
+            stats_button.clicked.connect(self._show_training_stats)
+
+            self_train_button = QtWidgets.QPushButton("自我訓練")
+            self_train_button.clicked.connect(self._on_self_train)
+
             control_panel.addWidget(QtWidgets.QLabel("FEN 輸入"))
             control_panel.addWidget(self.fen_input)
             control_panel.addWidget(load_button)
@@ -568,8 +652,11 @@ def _run_gui() -> None:
             control_panel.addWidget(color_group)
             control_panel.addWidget(view_group)
             control_panel.addWidget(analyze_button)
+            control_panel.addWidget(stats_button)
+            control_panel.addWidget(self_train_button)
             control_panel.addWidget(self.output_label)
             control_panel.addWidget(self.opening_label)
+            control_panel.addWidget(self.training_label)
             control_panel.addStretch(1)
 
             self.eval_bar = EvalBar()
@@ -580,6 +667,7 @@ def _run_gui() -> None:
 
             self._apply_qss()
             self._refresh_fen()
+            self._show_training_stats()
 
         def _refresh_fen(self) -> None:
             fen = self.board_widget.board().fen()
@@ -631,6 +719,32 @@ def _run_gui() -> None:
             self.board_widget.set_view_color(self._view_color)
             self._check_game_status()
 
+        def _show_training_stats(self) -> None:
+            stats = self._db_envoy.get_training_stats()
+            self.training_label.setText(
+                f"訓練資料：{stats.get('positions', 0)} 個局面，{stats.get('visits', 0)} 次分析。"
+            )
+
+        def _on_self_train(self) -> None:
+            if self._ai_running:
+                self.output_label.setText("AI 計算中，請稍後再訓練。")
+                return
+            fen = self.board_widget.board().fen()
+            depth = self.depth_input.value()
+            self._ai_running = True
+            self.output_label.setText("自我訓練中...")
+            self._self_train_worker = SelfTrainWorker(
+                self._analyzer, self._db_envoy, fen, depth
+            )
+            self._self_train_worker.finished.connect(self._on_self_train_finished)
+            self._self_train_worker.start()
+
+        def _on_self_train_finished(self, saved: int) -> None:
+            self._ai_running = False
+            self.output_label.setText(f"自我訓練完成，新增/更新 {saved} 個局面。")
+            self._show_training_stats()
+            self._check_turn()
+
         def _on_analyze(self) -> None:
             opponent_id = self.opponent_input.text().strip()
             game_id = self.game_input.text().strip() or None
@@ -641,11 +755,15 @@ def _run_gui() -> None:
                 self.output_label.setText("請提供對手 ID。")
                 return
 
-            cached = self._db_envoy.check_cache(fen)
+            self.opening_label.setText("")
+
+            cached = self._db_envoy.get_cached_analysis(fen)
             if cached:
-                move, score = cached
-                self.output_label.setText(f"快取最佳走法：{move}（分數：{score}）")
-                self.eval_bar.set_score(score)
+                self.output_label.setText(
+                    f"快取最佳走法：{cached['move']}（{_format_score(cached['score'], cached.get('mate_in'))}）"
+                )
+                self.eval_bar.set_score(cached["score"])
+                self._show_training_stats()
                 return
 
             history = self._db_envoy.get_opponent_history(opponent_id)
@@ -655,18 +773,40 @@ def _run_gui() -> None:
                     f"對手常用走法：{top['move']}（{top['move_count']} 次）。"
                 )
 
+            exact = self._db_envoy.get_position_tendency(opponent_id, fen)
+            if exact and exact.get("move"):
+                reply = self._analyzer.recommend_reply(fen, exact["move"], depth=depth)
+                if reply is not None:
+                    self.opening_label.setText(
+                        "此局面對手常走 "
+                        f"{exact['move']}（{exact['move_count']} 次）；反制建議："
+                        f"{reply.move}（{_format_score(reply.score, reply.mate_in)}）。"
+                    )
+                else:
+                    self.opening_label.setText(
+                        f"此局面對手常走 {exact['move']}（{exact['move_count']} 次）。"
+                    )
+
             opening = self._db_envoy.get_opponent_opening(opponent_id)
-            if opening.get("move"):
+            if opening.get("move") and not self.opening_label.text():
                 self.opening_label.setText(
                     f"提示：此對手習慣在目前局面下走 {opening['move']}。"
                 )
 
-            best_move, score = self._analyzer.get_best_move(fen, depth=depth)
+            result = self._analyzer.analyze_position(fen, depth=depth)
             self._db_envoy.save_analysis(
-                opponent_id, fen, best_move, score, game_id=game_id
+                opponent_id,
+                fen,
+                result.move,
+                result.score,
+                game_id=game_id,
+                mate_in=result.mate_in,
             )
-            self.output_label.setText(f"最佳走法：{best_move}（分數：{score}）")
-            self.eval_bar.set_score(score)
+            self.output_label.setText(
+                f"最佳走法：{result.move}（{_format_score(result.score, result.mate_in)}）"
+            )
+            self.eval_bar.set_score(result.score)
+            self._show_training_stats()
 
         def _check_turn(self) -> None:
             if self._ai_running:
@@ -696,21 +836,24 @@ def _run_gui() -> None:
             self._ai_worker.finished.connect(self._on_ai_finished)
             self._ai_worker.start()
 
-        def _on_ai_finished(self, move: str, score: float, from_cache: bool) -> None:
+        def _on_ai_finished(self, result: AnalysisResult, from_cache: bool) -> None:
             self._ai_running = False
             if self._game_over:
                 return
+            move = result.move
             if not move:
                 self.output_label.setText("AI 未能產生走法。")
                 return
             if not self.board_widget.apply_uci(move):
                 self.output_label.setText("AI 走法無效，請檢查棋盤狀態。")
                 return
-            self.eval_bar.set_score(score)
+            self.eval_bar.set_score(result.score)
+            score_text = _format_score(result.score, result.mate_in)
             if from_cache:
-                self.output_label.setText(f"AI 使用快取：{move}（分數：{score}）。輪到你了")
+                self.output_label.setText(f"AI 使用快取：{move}（{score_text}）。輪到你了")
             else:
-                self.output_label.setText(f"AI 走法：{move}（分數：{score}）。輪到你了")
+                self.output_label.setText(f"AI 走法：{move}（{score_text}）。輪到你了")
+            self._show_training_stats()
             self.board_widget.setEnabled(True)
 
         def _check_game_status(self) -> None:
