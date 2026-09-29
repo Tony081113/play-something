@@ -6,12 +6,14 @@ on:
       - "**/*.py"
       - "requirements.txt"
       - "play-something.spec"
+      - "stockfish/stockfish-windows-x86-64-avx2.exe"
       - ".github/workflows/build-windows-exe.yml"
   pull_request:
     paths:
       - "**/*.py"
       - "requirements.txt"
       - "play-something.spec"
+      - "stockfish/stockfish-windows-x86-64-avx2.exe"
       - ".github/workflows/build-windows-exe.yml"
   workflow_dispatch:
 
