@@ -27,13 +27,13 @@ def _load_stockfish_path() -> str:
 
     candidates = []
     if getattr(sys, "frozen", False):
-        candidates.append(os.path.join(getattr(sys, "_MEIPASS", ""), "stockfish-windows-x86-64-avx2.exe"))
-        candidates.append(os.path.join(os.path.dirname(sys.executable), "stockfish-windows-x86-64-avx2.exe"))
+        candidates.append(os.path.join(getattr(sys, "_MEIPASS", ""), "stockfish-windows-x86-64-universal.exe"))
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "stockfish-windows-x86-64-universal.exe"))
     candidates.append(
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "stockfish",
-            "stockfish-windows-x86-64-avx2.exe",
+            "stockfish-windows-x86-64-universal.exe",
         )
     )
 
@@ -41,7 +41,7 @@ def _load_stockfish_path() -> str:
         if candidate and os.path.isfile(candidate):
             return candidate
 
-    raise RuntimeError("找不到 Stockfish 執行檔，請將 stockfish-windows-x86-64-avx2.exe 放在程式旁邊。")
+    raise RuntimeError("找不到 Stockfish 執行檔，請將 stockfish-windows-x86-64-universal.exe 放在程式旁邊。")
 
 
 def _run_cli() -> None:
