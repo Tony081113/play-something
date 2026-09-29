@@ -141,6 +141,7 @@ def _run_gui() -> None:
             self._selected_square = None
             self._last_move = None
             self._player_color = chess.WHITE
+            self._view_color = chess.WHITE
             self._square_size = 64
             self._square_items = {}
             self._piece_items = {}
@@ -167,9 +168,12 @@ def _run_gui() -> None:
             self.boardChanged.emit()
 
         def set_player_color(self, color: bool) -> None:
-            if self._player_color == color:
-                return
             self._player_color = color
+
+        def set_view_color(self, color: bool) -> None:
+            if self._view_color == color:
+                return
+            self._view_color = color
             self._selected_square = None
             self._clear_overlays()
             self._clear_hints()
@@ -343,7 +347,7 @@ def _run_gui() -> None:
             display_rank = int(pos.y() // self._square_size)
             if not (0 <= display_file <= 7 and 0 <= display_rank <= 7):
                 return None
-            if self._player_color == chess.WHITE:
+            if self._view_color == chess.WHITE:
                 file = display_file
                 rank = 7 - display_rank
             else:
@@ -354,7 +358,7 @@ def _run_gui() -> None:
         def _square_rect(self, square: int) -> QtCore.QRectF:
             file = chess.square_file(square)
             rank = chess.square_rank(square)
-            if self._player_color == chess.WHITE:
+            if self._view_color == chess.WHITE:
                 display_file = file
                 display_rank = 7 - rank
             else:
@@ -473,6 +477,7 @@ def _run_gui() -> None:
             self._db_envoy = DBEnvoy()
             self._analyzer = ChessAnalyzer(_load_stockfish_path())
             self._player_color = chess.WHITE
+            self._view_color = chess.WHITE
             self._ai_running = False
             self._game_over = False
             self._check_blink_timer = None
@@ -489,6 +494,7 @@ def _run_gui() -> None:
             self.board_widget.boardChanged.connect(self._check_turn)
             self.board_widget.boardChanged.connect(self._check_game_status)
             self.board_widget.set_player_color(self._player_color)
+            self.board_widget.set_view_color(self._view_color)
 
             control_panel = QtWidgets.QVBoxLayout()
 
@@ -535,6 +541,16 @@ def _run_gui() -> None:
             color_layout.addWidget(self.white_radio)
             color_layout.addWidget(self.black_radio)
 
+            view_group = QtWidgets.QGroupBox("靠近玩家側")
+            view_layout = QtWidgets.QVBoxLayout(view_group)
+            self.view_white_radio = QtWidgets.QRadioButton("白棋")
+            self.view_black_radio = QtWidgets.QRadioButton("黑棋")
+            self.view_white_radio.setChecked(True)
+            self.view_white_radio.toggled.connect(self._on_view_color_changed)
+            self.view_black_radio.toggled.connect(self._on_view_color_changed)
+            view_layout.addWidget(self.view_white_radio)
+            view_layout.addWidget(self.view_black_radio)
+
             analyze_button = QtWidgets.QPushButton("分析")
             analyze_button.clicked.connect(self._on_analyze)
 
@@ -550,6 +566,7 @@ def _run_gui() -> None:
             control_panel.addWidget(QtWidgets.QLabel("深度"))
             control_panel.addWidget(self.depth_input)
             control_panel.addWidget(color_group)
+            control_panel.addWidget(view_group)
             control_panel.addWidget(analyze_button)
             control_panel.addWidget(self.output_label)
             control_panel.addWidget(self.opening_label)
@@ -608,6 +625,11 @@ def _run_gui() -> None:
             self._player_color = chess.WHITE if self.white_radio.isChecked() else chess.BLACK
             self.board_widget.set_player_color(self._player_color)
             self._check_turn()
+
+        def _on_view_color_changed(self) -> None:
+            self._view_color = chess.WHITE if self.view_white_radio.isChecked() else chess.BLACK
+            self.board_widget.set_view_color(self._view_color)
+            self._check_game_status()
 
         def _on_analyze(self) -> None:
             opponent_id = self.opponent_input.text().strip()
