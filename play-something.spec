@@ -4,7 +4,7 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[("stockfish/stockfish-windows-x86-64-avx2.exe", ".")],
+    datas=[("stockfish/stockfish-windows-x86-64-universal.exe", ".")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
