@@ -167,18 +167,20 @@ def _run_gui() -> None:
             self.boardChanged.emit()
 
         def set_player_color(self, color: bool) -> None:
+            if self._player_color == color:
+                return
             self._player_color = color
+            self._selected_square = None
+            self._clear_overlays()
+            self._clear_hints()
+            self._draw_board()
+            self._sync_pieces()
 
         def set_check_square(self, square: int) -> None:
             self._clear_check()
             if square is None:
                 return
-            rect = QtCore.QRectF(
-                chess.square_file(square) * self._square_size,
-                (7 - chess.square_rank(square)) * self._square_size,
-                self._square_size,
-                self._square_size,
-            )
+            rect = self._square_rect(square)
             overlay = self._scene.addRect(
                 rect,
                 QtGui.QPen(QtCore.Qt.NoPen),
@@ -195,6 +197,21 @@ def _run_gui() -> None:
             if move not in self._board.legal_moves:
                 return False
             return self._apply_move(move)
+
+        def undo_moves(self, count: int) -> bool:
+            undone = False
+            for _ in range(min(count, len(self._board.move_stack))):
+                self._board.pop()
+                undone = True
+            if not undone:
+                return False
+            self._selected_square = None
+            self._last_move = self._board.peek() if self._board.move_stack else None
+            self._clear_overlays()
+            self._clear_hints()
+            self._sync_pieces()
+            self.boardChanged.emit()
+            return True
 
         def mousePressEvent(self, event: QtCore.QEvent) -> None:
             if self._board.turn != self._player_color:
@@ -266,21 +283,21 @@ def _run_gui() -> None:
         def _draw_board(self) -> None:
             self._scene.clear()
             self._square_items.clear()
+            self._piece_items.clear()
+            self._selected_overlay = None
+            self._last_move_overlays = []
+            self._check_overlay = None
+            self._hint_items = []
             light = QtGui.QColor("#D7D7D7")
             dark = QtGui.QColor("#4A4A4A")
             for rank in range(8):
                 for file in range(8):
                     color = light if (rank + file) % 2 == 0 else dark
-                    rect = QtCore.QRectF(
-                        file * self._square_size,
-                        (7 - rank) * self._square_size,
-                        self._square_size,
-                        self._square_size,
-                    )
+                    square = chess.square(file, rank)
+                    rect = self._square_rect(square)
                     item = self._scene.addRect(
                         rect, QtGui.QPen(QtCore.Qt.NoPen), QtGui.QBrush(color)
                     )
-                    square = chess.square(file, rank)
                     self._square_items[square] = item
 
         def _sync_pieces(self) -> None:
@@ -314,29 +331,45 @@ def _run_gui() -> None:
             return pixmap
 
         def _piece_pos(self, square: int) -> QtCore.QPointF:
-            file = chess.square_file(square)
-            rank = chess.square_rank(square)
-            x = file * self._square_size + 4
-            y = (7 - rank) * self._square_size + 4
+            rect = self._square_rect(square)
+            x = rect.x() + 4
+            y = rect.y() + 4
             return QtCore.QPointF(x, y)
 
         def _square_at(self, pos: QtCore.QPointF) -> int:
             if pos.x() < 0 or pos.y() < 0:
                 return None
-            file = int(pos.x() // self._square_size)
-            rank = 7 - int(pos.y() // self._square_size)
-            if not (0 <= file <= 7 and 0 <= rank <= 7):
+            display_file = int(pos.x() // self._square_size)
+            display_rank = int(pos.y() // self._square_size)
+            if not (0 <= display_file <= 7 and 0 <= display_rank <= 7):
                 return None
+            if self._player_color == chess.WHITE:
+                file = display_file
+                rank = 7 - display_rank
+            else:
+                file = 7 - display_file
+                rank = display_rank
             return chess.square(file, rank)
 
-        def _highlight_selected(self, square: int) -> None:
-            self._clear_selected()
-            rect = QtCore.QRectF(
-                chess.square_file(square) * self._square_size,
-                (7 - chess.square_rank(square)) * self._square_size,
+        def _square_rect(self, square: int) -> QtCore.QRectF:
+            file = chess.square_file(square)
+            rank = chess.square_rank(square)
+            if self._player_color == chess.WHITE:
+                display_file = file
+                display_rank = 7 - rank
+            else:
+                display_file = 7 - file
+                display_rank = rank
+            return QtCore.QRectF(
+                display_file * self._square_size,
+                display_rank * self._square_size,
                 self._square_size,
                 self._square_size,
             )
+
+        def _highlight_selected(self, square: int) -> None:
+            self._clear_selected()
+            rect = self._square_rect(square)
             overlay = self._scene.addRect(
                 rect,
                 QtGui.QPen(QtCore.Qt.NoPen),
@@ -349,12 +382,7 @@ def _run_gui() -> None:
             self._clear_last_move()
             color = QtGui.QColor(0, 255, 204, 120)
             for square in (from_square, to_square):
-                rect = QtCore.QRectF(
-                    chess.square_file(square) * self._square_size,
-                    (7 - chess.square_rank(square)) * self._square_size,
-                    self._square_size,
-                    self._square_size,
-                )
+                rect = self._square_rect(square)
                 overlay = self._scene.addRect(
                     rect, QtGui.QPen(QtCore.Qt.NoPen), QtGui.QBrush(color)
                 )
@@ -407,11 +435,7 @@ def _run_gui() -> None:
             self._hint_items.append(item)
 
         def _square_center(self, square: int) -> QtCore.QPointF:
-            file = chess.square_file(square)
-            rank = chess.square_rank(square)
-            x = file * self._square_size + self._square_size / 2
-            y = (7 - rank) * self._square_size + self._square_size / 2
-            return QtCore.QPointF(x, y)
+            return self._square_rect(square).center()
 
         def _clear_hints(self) -> None:
             for item in self._hint_items:
@@ -477,6 +501,9 @@ def _run_gui() -> None:
             reset_button = QtWidgets.QPushButton("重置棋盤")
             reset_button.clicked.connect(self._on_reset)
 
+            undo_button = QtWidgets.QPushButton("悔棋")
+            undo_button.clicked.connect(self._on_undo)
+
             self.fen_display = QtWidgets.QLineEdit()
             self.fen_display.setReadOnly(True)
 
@@ -515,6 +542,7 @@ def _run_gui() -> None:
             control_panel.addWidget(self.fen_input)
             control_panel.addWidget(load_button)
             control_panel.addWidget(reset_button)
+            control_panel.addWidget(undo_button)
             control_panel.addWidget(QtWidgets.QLabel("目前 FEN"))
             control_panel.addWidget(self.fen_display)
             control_panel.addWidget(self.opponent_input)
@@ -557,6 +585,24 @@ def _run_gui() -> None:
 
         def _on_reset(self) -> None:
             self._reset_game(show_message=True)
+
+        def _on_undo(self) -> None:
+            if self._ai_running:
+                self.output_label.setText("AI 計算中，請稍後再悔棋。")
+                return
+            board = self.board_widget.board()
+            if not board.move_stack:
+                self.output_label.setText("目前沒有可悔棋的步。")
+                return
+            undo_count = 2 if board.turn == self._player_color and len(board.move_stack) >= 2 else 1
+            if self.board_widget.undo_moves(undo_count):
+                self._game_over = False
+                self._ai_running = False
+                self.eval_bar.set_score(0.0)
+                self._stop_check_blink()
+                self.output_label.setText("已悔棋。")
+                self._check_game_status()
+                self._check_turn()
 
         def _on_color_changed(self) -> None:
             self._player_color = chess.WHITE if self.white_radio.isChecked() else chess.BLACK
